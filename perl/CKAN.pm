@@ -110,9 +110,10 @@ sub create {
     print "url ok\n"; 
   }
 
-  # DATASTORE OPRETTES evt med fields
+  # DATASTORE OPRETTES evt med fields / index
   my $data =  { resource_id => $resource_id };
   $data->{fields} = $self->{fields} if exists $self->{fields};
+  $data->{indexes} = $self->{indexes} if exists $self->{indexes};
 
   $result = $self->ckan_function('datastore_create', $data );
   return unless defined $result;
