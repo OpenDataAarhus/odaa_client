@@ -15,7 +15,7 @@ use JSON;
 my @attributes;
 
 BEGIN {
-  @attributes= qw(debug baseurl organisation package_name package_title resource_name fields);
+  @attributes= qw(debug baseurl organisation package_name package_title resource_name fields indexes primary_key);
 }
 
 sub new {
@@ -118,7 +118,7 @@ sub create {
 
   $result = $self->ckan_function('datastore_create', $data );
   return unless defined $result;
-  print "datastore created/updated\n";
+  print "datastore created/updated2\n";
 
   return $resource_id;
 }
