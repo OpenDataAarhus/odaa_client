@@ -2,14 +2,13 @@ package CKAN;
 #
 # Fejlhåndtering er ikke-eksisterende f.eks. manglende parametre eller forkerte data
 # En metode kunne være at gemme sidste fejl i ckan-obj (self) som så kan hentes via særlig metode
-# 
+#
 # Funktion create (bedre navn?) udskriver diverse info som evt. kun skulle udskrives i debugmode eller gemmes i ckan-obj
 #
 # Generel info: http://docs.ckan.org/en/ckan-2.0.3/api.html
 #
 use strict;
 use HTTP::Tiny;
-use URI;
 use JSON;
 #use Data::Dump qw/dump/;
 my @attributes;
@@ -32,7 +31,10 @@ sub new {
   for my $key ( @attributes ) {
     $self->{$key} = $args{$key} if exists $args{$key}
   }
-
+  # construct url to later use:
+  if ( exists $self->{baseurl} ) {
+    $self->{baseurl} .= '/' unless $self->{baseurl} =~ m!/$!;
+  }
   return bless $self, $class;
 }
 
@@ -53,10 +55,9 @@ sub ckan_url {
   # helper-function for correct ckan url
   my ($self, $function, $query)=@_;
 
-  my $uri = URI->new($self->{baseurl});
-  $uri->path( 'api/3/action/' . $function);
-  $uri->query_form( $query ) if $query;
-  return $uri->as_string;
+  my $url = $self->{baseurl} . 'api/3/action/' . $function;
+  $url .= '?' . $self->{http}->www_form_urlencode( $query ) if $query;
+  return $url;
 }
 
 sub create {
@@ -96,8 +97,8 @@ sub create {
     return unless defined $resource_obj;
     print 'resource created: ';
   }
-  my $resource_id = $resource_obj->{id};  
-  
+  my $resource_id = $resource_obj->{id};
+
   print $resource_id, "\n";
 
   # OPDATER RESOURCE - hvis nødvendigt
@@ -107,7 +108,7 @@ sub create {
     return unless defined $result;
     print "url updated\n";
   } else {
-    print "url ok\n"; 
+    print "url ok\n";
   }
 
   # DATASTORE OPRETTES evt med fields / index / primary_key
@@ -118,7 +119,7 @@ sub create {
 
   $result = $self->ckan_function('datastore_create', $data );
   return unless defined $result;
-  print "datastore created/updated2\n";
+  print "datastore created/updated\n";
 
   return $resource_id;
 }
@@ -155,6 +156,5 @@ sub ckan_function {
 
   return ($result && $result->{success} eq 'true' ? $result->{result} : undef );
 }
-
 
 1;
