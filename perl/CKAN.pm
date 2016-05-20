@@ -6,15 +6,18 @@ package CKAN;
 # Funktion create (bedre navn?) udskriver diverse info som evt. kun skulle udskrives i debugmode eller gemmes i ckan-obj
 #
 # Generel info: http://docs.ckan.org/en/ckan-2.0.3/api.html
+
+# 20160204: adding get_max_value_from_resource
+#
+#
 #
 use strict;
 use HTTP::Tiny;
 use JSON;
-#use Data::Dump qw/dump/;
 my @attributes;
 
 BEGIN {
-  @attributes= qw(debug baseurl organisation package_name package_title resource_name fields indexes primary_key);
+  @attributes= qw(debug baseurl organisation package_name package_title resource_name fields indexes primary_key resource_id);
 }
 
 sub new {
@@ -93,18 +96,23 @@ sub create {
 
   # IKKE fundet - forsøg at oprette...
   if ( ! defined $resource_obj) {
-    $resource_obj = $self->ckan_function('resource_create', { package_id => $package_id, url => 'http://dummy', name => $self->{resource_name}} );
+  
+    my $url = 'http://www.odaa.dk/random_uri';
+    print "Trying $url\n";
+  
+    $resource_obj = $self->ckan_function('resource_create', { package_id => $package_id, url => $url, name => $self->{resource_name}, format => "csv" });
     return unless defined $resource_obj;
-    print 'resource created: ';
+    print "resource created\n";
   }
   my $resource_id = $resource_obj->{id};
 
-  print $resource_id, "\n";
+  print 'id=', $resource_id, "\n";
 
   # OPDATER RESOURCE - hvis nødvendigt
   my $url = $self->ckan_url('datastore_search', { resource_id => $resource_id});
+  print 'url=', $url, "\n";
   if ( $url ne $resource_obj->{url} ) {
-    $result = $self->ckan_function('resource_update', { id => $resource_id, url => $url } );
+    $result = $self->ckan_function('resource_update', { id => $resource_id, url => $url, format => "csv" } );
     return unless defined $result;
     print "url updated\n";
   } else {
@@ -124,7 +132,6 @@ sub create {
   return $resource_id;
 }
 
-
 sub ckan_function {
   # The real working horse
   my ( $self, $function, $data )=@_;
@@ -132,6 +139,8 @@ sub ckan_function {
   my $json = JSON->new->allow_nonref(1)->utf8(1);
 
   my $url = $self->ckan_url($function);
+  
+  $data->{force} = "true";
 
   my $jsondata = $json->encode( $data );
 
@@ -144,7 +153,6 @@ sub ckan_function {
     open(DATA, ">:utf8", $self->{debug} . '-' . $self->{filecounter} . ".txt" );
     print DATA $url, "\n", $jsondata, "\n";
     print DATA $response->{content}, "\n" ;
-    #print DATA dump($response);
     close(DATA);
   }
 
@@ -153,8 +161,21 @@ sub ckan_function {
 
   # hvis status er ok så antages at indholdet ER json
   my $result = $json->decode( $response->{content} );
+  
+  return ($result && $result->{success} ? $result->{result} : undef );
+}
 
-  return ($result && $result->{success} eq 'true' ? $result->{result} : undef );
+sub get_max_value_from_resource {
+#
+# henter fra den aktuelle ressource max-værdien af det ønskede felt
+#
+  my ($self, $field)=@_;
+                                        
+  my $data = { sql => 'SELECT max('.$field.') as "' . $field . '" from "' . $self->{resource_id} . '"' };
+  
+  my $result = $self->ckan_function('datastore_search_sql', $data );  
+  
+  return ( defined $result ? $result->{records}[0]{$field} : undef);  
 }
 
 1;
