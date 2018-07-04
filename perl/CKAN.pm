@@ -8,37 +8,100 @@ package CKAN;
 # Generel info: http://docs.ckan.org/en/ckan-2.0.3/api.html
 
 # 20160204: adding get_max_value_from_resource
+# 20160615: adding send_data
 #
 #
 #
 use strict;
 use HTTP::Tiny;
 use JSON;
+use Time::Piece;
+#use Data::Dumper;
 my @attributes;
 
 BEGIN {
-  @attributes= qw(debug baseurl organisation package_name package_title resource_name fields indexes primary_key resource_id);
+  @attributes= qw(apikey apikey_owner debug baseurl organisation package_name package_title resource_name fields indexes primary_key resource_id update_resource_id);
 }
 
 sub new {
   my($class, %args) = @_;
 
   my $self = {
-       http => HTTP::Tiny->new( default_headers => {
-                                      'Content-type' => 'application/json; charset=utf-8',
-                                      'Authorization' => $args{apikey},
-                                      }),
-       filecounter => 0,
+     filecounter => 0,
   };
+  if ( exists $args{file} ){
+    # skal håndtere begge formater
+    #  - gammelt med alle værdier i samme niveau 
+    #  - nyt hvor ikke-ckan-værdier er lagt under 'data'
 
-  for my $key ( @attributes ) {
-    $self->{$key} = $args{$key} if exists $args{$key}
+    open(DATA, $args{file} ) or die $!;
+    local $/;
+    my $json_text = <DATA>;
+    close(DATA);
+    my $config = JSON->new()->utf8(1)->decode( $json_text );
+
+    my %ckan_parms = map { $_ => 1 } @attributes;
+
+    #
+    # alle "data" overføres straks
+    # er der yderligere "ugyldige" værdier lægges de også i data 
+    #
+    if ( exists $config->{data}){
+      $self->{data} = $config->{data};
+    }
+    foreach(keys %$config){
+      next if /^data$/; # skip data der er håndteret
+      if ( exists $ckan_parms{$_} ) {
+        $self->{$_} = $config->{$_};
+      } else {
+        $self->{data}{$_} = $config->{$_};
+      }
+    }
+    $self->{file} = $args{file};
+
+  } else {
+    foreach ( @attributes ) {
+      $self->{$_} = $args{$_} if exists $args{$_}
+    }
   }
+
+  $self->{http} = HTTP::Tiny->new( default_headers => {
+                                      'Content-type' => 'application/json; charset=utf-8',
+                                      'Authorization' => $self->{apikey},
+                                      });
+
   # construct url to later use:
   if ( exists $self->{baseurl} ) {
-    $self->{baseurl} .= '/' unless $self->{baseurl} =~ m!/$!;
+    $self->{_baseurl}  = $self->{baseurl};
+    $self->{_baseurl} .= '/' unless $self->{_baseurl} =~ m!/$!;
   }
   return bless $self, $class;
+
+}
+
+
+sub save_config {
+  # gemmer tidligere indlæste data
+  # filnavn kan udelades hvorefter der gemmes i den originale
+  # dør hvis der ikke er et filnavn
+
+  my $self = shift;
+  my $file = shift // $self->{file};
+
+  my $ref;
+  foreach(@attributes){
+    $ref->{$_} = $self->{$_} if exists $self->{$_}
+  }
+  if ( exists $self->{data}){
+    $ref->{data} = $self->{data};
+  }
+
+  my $json_text = JSON->new()->utf8(1)->canonical(1)->pretty->encode( $ref );
+  # eller skulle der bruges Try::Tiny her
+  
+  open(DATA, '>'. $file ) or die $!;
+  print DATA $json_text;
+  close(DATA);
 }
 
 sub get_organisations_id {
@@ -58,7 +121,7 @@ sub ckan_url {
   # helper-function for correct ckan url
   my ($self, $function, $query)=@_;
 
-  my $url = $self->{baseurl} . 'api/3/action/' . $function;
+  my $url = $self->{_baseurl} . 'api/3/action/' . $function;
   $url .= '?' . $self->{http}->www_form_urlencode( $query ) if $query;
   return $url;
 }
@@ -96,10 +159,10 @@ sub create {
 
   # IKKE fundet - forsøg at oprette...
   if ( ! defined $resource_obj) {
-  
-    my $url = 'http://www.odaa.dk/random_uri';
+
+    my $url = 'http://portal.opendata.dk/random_uri';
     print "Trying $url\n";
-  
+
     $resource_obj = $self->ckan_function('resource_create', { package_id => $package_id, url => $url, name => $self->{resource_name}, format => "csv" });
     return unless defined $resource_obj;
     print "resource created\n";
@@ -107,10 +170,12 @@ sub create {
   my $resource_id = $resource_obj->{id};
 
   print 'id=', $resource_id, "\n";
+  print 'url (old)=', $resource_obj->{url}, "\n";
 
   # OPDATER RESOURCE - hvis nødvendigt
   my $url = $self->ckan_url('datastore_search', { resource_id => $resource_id});
   print 'url=', $url, "\n";
+
   if ( $url ne $resource_obj->{url} ) {
     $result = $self->ckan_function('resource_update', { id => $resource_id, url => $url, format => "csv" } );
     return unless defined $result;
@@ -129,6 +194,9 @@ sub create {
   return unless defined $result;
   print "datastore created/updated\n";
 
+  # save in object
+  $self->{resource_id} = $resource_id;
+
   return $resource_id;
 }
 
@@ -139,7 +207,7 @@ sub ckan_function {
   my $json = JSON->new->allow_nonref(1)->utf8(1);
 
   my $url = $self->ckan_url($function);
-  
+
   $data->{force} = "true";
 
   my $jsondata = $json->encode( $data );
@@ -161,8 +229,56 @@ sub ckan_function {
 
   # hvis status er ok så antages at indholdet ER json
   my $result = $json->decode( $response->{content} );
-  
+
   return ($result && $result->{success} ? $result->{result} : undef );
+}
+
+sub delete_all_data_from_resource {
+  my ($self)=@_;
+
+  my $data = { resource_id => $self->{resource_id} };
+
+  my $result = $self->ckan_function('datastore_delete', $data );# DELETE
+
+  return ($result && $result->{success} ? $result->{result} : undef );
+}
+
+sub delete_some_data_from_resource {
+  my ($self, $id)=@_;
+
+  $id += 0;
+  return unless $id;
+
+  my $data = { resource_id => $self->{resource_id}, filters => { '_id' => $id } };
+
+  my $result = $self->ckan_function('datastore_delete', $data );# DELETE
+
+  return ($result && $result->{success} ? $result->{result} : undef );
+  
+}
+
+sub get_info_from_resource {
+  my ($self)=@_;
+
+  my $data = { id => $self->{resource_id} };
+
+  my $result = $self->ckan_function('datastore_info', $data ); # INFO
+
+  return ($result && $result->{success} ? $result->{result} : undef );
+
+}
+
+sub get_size_of_resource {
+#
+# henter fra den aktuelle ressource max-værdien af det ønskede felt
+#
+  my ($self, $field)=@_;
+
+  my $data = { sql => 'SELECT count(*) as "' . $field . '" from "' . $self->{resource_id} . '"' };
+
+  my $result = $self->ckan_function('datastore_search_sql', $data );
+
+  return ( defined $result ? $result->{records}[0]{$field} : undef);
 }
 
 sub get_max_value_from_resource {
@@ -170,12 +286,118 @@ sub get_max_value_from_resource {
 # henter fra den aktuelle ressource max-værdien af det ønskede felt
 #
   my ($self, $field)=@_;
-                                        
+
   my $data = { sql => 'SELECT max('.$field.') as "' . $field . '" from "' . $self->{resource_id} . '"' };
-  
-  my $result = $self->ckan_function('datastore_search_sql', $data );  
-  
-  return ( defined $result ? $result->{records}[0]{$field} : undef);  
+
+  my $result = $self->ckan_function('datastore_search_sql', $data );
+
+  return ( defined $result ? $result->{records}[0]{$field} : undef);
 }
+
+sub send_data {
+#
+# Sender data via angiven metode
+#
+  my ( $self, $method, $data )=@_;
+
+  my $max = 1000;
+  my $count = 0;
+  while ( $#$data > -1 ) {
+
+    my $localrec = [ splice(@$data, 0, $max) ];
+
+    my $result = $self->ckan_function('datastore_upsert', { resource_id => $self->{resource_id}, records => $localrec,  method => $method } );
+    sleep(1);
+
+    if ($result) {
+      $count += $#{$result->{records}}+1;
+    } else {
+      return;
+    }
+  }
+  return $count;
+}
+
+sub dump_data {
+  my ( $self, $file )=@_;
+
+  # my $self = shift;
+  # my $file = shift;
+  # my $offset = shift // 0;
+  # my $limit = shift // 100000;
+
+
+ # data_dict = {
+      # 'resource_id': resource_id,
+      # 'limit': request.GET.get('limit', 100000),
+      # 'offset': request.GET.get('offset', 0)
+  # }
+
+  my $dumpurl = $self->{_baseurl} . 'datastore/dump/' . $self->{resource_id};
+
+  my $limit = 50000;
+  my $offset = 0;
+
+  unlink $file if -e $file;
+
+  my $count = 0;
+
+  LOOP:
+  {
+    my $params = $self->{http}->www_form_urlencode( { limit => $limit, offset => $offset}  );
+    my $url = $dumpurl . '?' . $params;
+
+    my $response = $self->{http}->get($url);
+
+    return 0 unless $response->{success};
+
+
+    # If the REPLACEMENTLIST is empty, the SEARCHLIST is replicated. This latter is useful for counting characters in a class
+    my $nr_of_lines = $response->{content} =~ tr/\n//;
+    $count += $nr_of_lines;
+
+    # fjern optælling af headeren
+    $count -= 1;
+
+    if ( $offset > 0 ) {
+       # fjern 1. linje
+       $response->{content} =~ s/^.*[\r\n]+//;
+    }
+
+    # gem data
+    #
+    #
+    open(DATA, ">>$file");
+    binmode(DATA);
+    print DATA $response->{content};
+    close(DATA);
+
+
+    # hvis der er præcis "limit"-linjer så kan der være mere at hente - hvis der er færre har vi hentet det ønskede
+    if ( $nr_of_lines == $limit +1 ) {
+      # potentielt mere indhold
+      $offset += $limit;
+      redo LOOP;
+    }
+  }
+  return $count;
+
+}
+
+
+sub send_update_time {
+  my ( $self, $frequency, $count)=@_;
+
+  return unless exists $self->{update_resource_id};
+
+  $frequency+= 0;
+  $count += 0;
+
+  my $records = [ { resource_id => $self->{resource_id}, date => Time::Piece->new->datetime, frequency => $frequency, count => $count } ];
+
+  my $result = $self->ckan_function('datastore_upsert', { resource_id => $self->{update_resource_id}, records => $records,  method => 'upsert' } );
+
+}
+
 
 1;
